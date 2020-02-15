@@ -1,0 +1,12 @@
+./tmp
+./data
+**/.pytest_cache
+*.json
+
+.venv
+
+**/__pycache__
+**/*.tsv
+**/*.jsonl
+.DS_Store
+logs.txt

@@ -1,0 +1,23 @@
+# reactome_to_bel -- docker-compose build && docker-compose up -d
+version: "3.3"
+
+services:
+    arangodb:
+        container_name: reactome_arangodb
+        image: arangodb:3.5
+        ports:
+            - "18529:8529"
+        volumes:
+            - ./data/arangodb:/var/lib/arangodb3
+        environment:
+            - ARANGO_NO_AUTH=1
+            - ARANGO_STORAGE_ENGINE=rocksdb
+        logging:
+            driver: "json-file"
+            options:
+                max-size: "10k"
+                max-file: "3"
+        healthcheck:
+            test: curl -f http://localhost:8529/_api/version || exit 1
+
+        restart: unless-stopped
