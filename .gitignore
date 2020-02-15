@@ -10,3 +10,4 @@
 **/*.jsonl
 .DS_Store
 logs.txt
+/data
