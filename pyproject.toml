@@ -11,6 +11,7 @@ structlog = "*"
 python-arango = "*"
 invoke = "*"
 jsons = "*"
+xxhash = "^1.4.3"
 
 [tool.poetry.dev-dependencies]
 pytest = "*"

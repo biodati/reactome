@@ -4,6 +4,8 @@ import os.path
 
 REACTOME_API_URL = "https://reactome.org/ContentService/data"
 
+# https://reactome.org/ContentService/data/query/enhanced/390750
+
 # app directory
 appdir = os.path.split(os.path.dirname(os.path.abspath(inspect.getfile(inspect.currentframe()))))[0]
 ARANGO_DATA_DIR = f"{appdir}/data/arangodb"
