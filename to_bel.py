@@ -4,8 +4,8 @@ import glob
 import itertools
 import json
 import re
-from collections import Iterable
-from typing import List
+from collections.abc import Iterable
+from typing import List, Optional
 
 import xxhash
 import db
@@ -31,8 +31,8 @@ unmatched_fh = open("unmatched.tsv", "w")
 sets_fh = open("sets.json", "w")
 errors_fh = open("errors.tsv", "w")
 
-families = {}  # named families to write into BEL statemens (isA relations)
-complexes = {}  # named complexes to write into BEL statements (hasComponent relations)
+entity_sets = {}  # named families to write into BEL statemens (isA relations)
+# complexes = {}  # named complexes to write into BEL statements (hasComponent relations)
 
 now = f"{datetime.datetime.utcnow().isoformat(timespec='milliseconds')}Z"
 
@@ -63,7 +63,7 @@ def quote_entity(entity_str):
 
 class CustomEncoder(json.JSONEncoder):
     def default(self, obj):
-        if isinstance(obj, (Function, Entity, Complex, EntitySet, Regulator)):
+        if isinstance(obj, (Function, Entity, Complex, EntitySet, Regulator, Catalyst, PMod)):
             return obj.to_json()
         return json.JSONEncoder.default(self, obj)
 
@@ -141,7 +141,7 @@ class Function:
     def to_json(self):
         r = {
             "Function": {
-                "type": self.function,
+                "function": self.function,
                 "parameters": self.parameters,
                 "stid": self.stid,
                 "stid_version": self.stid_version,
@@ -158,17 +158,26 @@ class Function:
             if isinstance(parameter, str):
                 parameters_list.append(parameter)
             else:
-                parameters_list.append(parameter.to_bel(strip_locations=strip_locations))
-        
+                parameters_list.append(parameter.to_bel(strip_locations=strip_locations))        
 
         location = ""
-        if not strip_locations:
+        if not strip_locations and self.loc:
             location = f", loc({self.loc})"
 
-        modifications = ""
+        modifications = []
         if self.mods:
-            modifications = f', {", ".join(self.mods)}'
-        return f'{self.function}({", ".join(parameters_list)}{modifications}{location})'
+            for mod in self.mods:
+                modifications.append(mod.to_bel())
+
+            modifications = f', {", ".join(modifications)}'
+        else:
+            modifications = ""
+            
+        bel = f'{self.function}({", ".join(parameters_list)}{modifications}{location})'
+
+        log.debug("Function to_bel", bel=bel, strip_locations=strip_locations)
+
+        return bel
 
     def __str__(self):
         parameters_list = []
@@ -204,15 +213,54 @@ class Function:
         return int(xxhash.xxh32(str(self.__repr__())).intdigest())
 
 
+class PMod:
+    def __init__(self, modification, dbid, residue: Optional[str] = None, coordinate: Optional[int] = None):
+        self.modification = modification
+        self.residue = residue
+        self.coordinate = coordinate
+        self.dbid = dbid
+    
+    def to_bel(self, strip_locations=False):
+
+        if self.modification and self.residue and self.coordinate:
+            return f"pmod({self.modification}, {self.residue}, {self.coordinate})"
+        elif self.modification and self.residue:
+            return f"pmod({self.modification}, {self.residue})"
+        else:
+            return f"pmod({self.modification})"
+    
+    def mod_only_to_bel(self):
+        """Only provide the modification - used for EntitySets"""
+
+        return f"pmod({self.modification})"
+
+    def to_json(self):
+        r = {
+            "pmod": {
+                "modification": self.modification,
+                "residue": self.residue,
+                "coordinate": self.coordinate,
+                "dbid": self.dbid,
+            }
+        }
+        return r
+
+    def __str__(self):
+        return self.to_bel()
+
+    def __repr__(self):
+        return self.__str__()
+
 class Complex:
     def __init__(
-        self, members: list, stid: str, stid_version: str, dbid: str, name: str = "", loc: str = ""
+        self, members: list, stid: str, stid_version: str, dbid: str, label: str = "", loc: str = ""
     ):
         self.members: list = members
+        self.function = "complex"
         self.stid: str = stid
         self.stid_version: str = stid_version
         self.dbid: str = dbid
-        self.name: str = name
+        self.label: str = label
         self.type = "Complex"
         self.loc: str = loc
 
@@ -225,7 +273,7 @@ class Complex:
                 "stid": self.stid,
                 "stid_version": self.stid_version,
                 "dbid": self.dbid,
-                "name": self.name,
+                "label": self.label,
                 "loc": self.loc,
             }
         }
@@ -239,23 +287,38 @@ class Complex:
 
         locations = set()
         for member in self.members:
-            if member.type == "Fuction":
+            if member.type == "Function":
                 locations.add(member.loc)
-        
-        print("Locations", locations)
+
+        log.debug("Locations", locations)
 
         if len(locations) == 1:
             self.loc = list(locations)[0]
         else:
             log.warning("Complex has mis-matched locations", complex=self.__repr__)
             self.loc = ""
-        
-    def to_bel(self, strip_member_locations=True):
+    
+    def get_members(self):
+        """Get Complex members to flatten out the complex members"""
 
+        members = set()
+        for member in self.members:
+            if isinstance(member, Complex):
+                for c in member.get_members():
+                    members.add(c)
+            else:
+                members.add(member)
+        
+        return list(members)
+        
+    def to_bel(self, strip_locations=True):
+        strip_locations = True  # override this variable
+
+        self.get_location()
 
         members_strings = []
-        for member in sorted(self.members):
-            members_strings.append(member.to_bel(strip_locations=strip_member_locations))
+        for member in sorted(self.get_members()):
+            members_strings.append(member.to_bel(strip_locations=strip_locations))
 
         return f"complex({', '.join(members_strings)}, loc({self.loc})"
 
@@ -271,32 +334,45 @@ class Complex:
     def __eq__(self, other):
         return self.__repr__() == other.__repr__()
 
+    def  __hash__(self):
+        return int(xxhash.xxh32(str(self.__repr__())).intdigest())
+        
 
 class EntitySet:
     def __init__(
         self,
+        id: str,
         members: list,
         stid: str,
         stid_version: str,
         dbid: str,
-        type: str,
-        name: str = "",
+        type_: str,
+        namespace: str = "REACTOME",
+        label: str = "",
         loc: str = "",
+        function: str = "",
     ):
+        self.namespace = namespace
+        self.id = id
         self.members: list = members
-        self.loc: str = loc
         self.stid: str = stid
         self.stid_version: str = stid_version
         self.dbid: str = dbid
-        self.name: str = name
-        self.type: str = type
+        self.label: str = label
+        self.type: str = type_
+
+        self.get_location()
+        self.get_function()
+        self.get_modifications()
 
     def to_json(self):
         r = {
             "entity_set": {
+                "namespace": self.namespace,
+                "id": self.id,
                 "members": self.members,
                 "type": self.type,
-                "name": self.name,
+                "label": self.label,
                 "stid": self.stid,
                 "stid_version": self.stid_version,
                 "dbid": self.dbid,
@@ -313,12 +389,10 @@ class EntitySet:
             else:
                 log.warning(f"EntitySet {self.dbid} has non-function member: {str(member)}")
         if len(functions) == 1:
-            f = list(functions)[0]
-            return f
+            self.function = list(functions)[0]
         else:
-            log.warning(f"EntitySet {self.dbid} has multiple functions {str(list(functions))}")
-
-        return "MISSING"
+            self.function = "MISSING"
+            log.warning(f"EntitySet {self.dbid} has multiple or no functions {str(list(functions))}")
 
     def get_location(self):
         locations = set()
@@ -329,17 +403,40 @@ class EntitySet:
                 log.warning(f"EntitySet {self.dbid} has no location: {str(member)}")
 
         if len(locations) == 1:
-            location = list(locations)[0]
-            return location
+            self.loc = list(locations)[0]
         else:
-            log.warning(f"EntitySet {self.dbid} has multiple locations {str(list(locations))}")
+            log.warning(f"EntitySet {self.dbid} has multiple or no locations {str(list(locations))}")
+            self.loc = ""
 
-        return "MISSING"
+    def get_modifications(self):
+        mods = set()
+        for member in self.members:
+            if isinstance(member, Function):
+                for mod in member.mods:
+                    mods.add(mod)
+            else:
+                log.warning(f"EntitySet {self.dbid} has non-function member: {str(member)}")
+
+        if len(mods) > 0:
+            # TODO - simplify mods
+            self.mods = list(mods)
+        else:
+            # log.warning(f"EntitySet {self.dbid} has multiple or no locations {str(list(mods))}")
+            self.mods = []
 
     def to_bel(self, strip_locations=False):
-        if not strip_locations:
-            location = f", loc({self.get_location()})"
-        return f"{self.get_function()}(REACTOME:{self.stid_version}!{self.name}{location})"
+
+        location = ""
+        if not strip_locations and self.loc:
+            location = f", loc({self.loc})"
+
+        modifications = ""
+        if self.mods:
+            modifications = list(set([mod.mod_only_to_bel() for mod in self.mods]))
+            modifications = ", ".join(modifications)
+            modifications = f", {modifications}"
+
+        return f"{self.function}(REACTOME:{self.stid_version}!{quote_entity(self.label)}{modifications}{location})"
 
     def list_members(self):
         members_list = []
@@ -353,7 +450,7 @@ class EntitySet:
 
 
     def __str__(self):
-        return f"REACTOME:{self.stid_version}!{self.name} - {self.type}"
+        return f"REACTOME:{self.stid_version}!{quote_entity(self.label)} - {self.type}"
 
 
     def __repr__(self):
@@ -381,11 +478,42 @@ class Regulator:
         }
         return r
 
-    def to_bel(self):
+    def to_bel(self, strip_locations=False):
         return self.__repr__()
 
     def __str__(self):
         return f"Regulator: {self.regulator} Relation: {self.relation}"
+
+    def __repr__(self):
+        return self.__str__()
+
+
+class Catalyst:
+    def __init__(
+        self, catalyst, relation, dbid, stid, stid_version: str,
+    ):
+        self.catalyst = catalyst
+        self.relation = relation
+        self.dbid = dbid
+        self.stid = stid
+        self.stid_version: str = stid_version
+        self.type = "Catalyst"
+
+    def to_json(self):
+        r = {
+            "catalyst": self.catalyst,
+            "relation": self.relation,
+            "dbid": self.dbid,
+            "stid": self.stid,
+            "stid_version": self.stid_version,
+        }
+        return r
+
+    def to_bel(self, strip_locations=False):
+        return self.__repr__()
+
+    def __str__(self):
+        return f"Catalyst: {self.catalyst} Relation: {self.relation}"
 
     def __repr__(self):
         return self.__str__()
@@ -401,9 +529,9 @@ def get_creator(metadata, doc):
         authored_doc = db.get_entity(authored_id)
 
         if "author" in authored_doc:
-            metadata["gd_creator"] = authored_doc["author"][0].get("displayName", "")
+            metadata["creator"] = authored_doc["author"][0].get("displayName", "")
             metadata["gd_createTS"] = ts_convert(authored_doc["dateTime"])
-            metadata["gd_creator_orcid"] = authored_doc["author"][0].get("orcidId", "")
+            metadata["creator_orcid"] = authored_doc["author"][0].get("orcidId", "")
 
     elif "created" in doc:
         matches = re.match(
@@ -424,7 +552,7 @@ def get_creator(metadata, doc):
             timestamp = matches.group(2)
             timestamp = f"{timestamp} 00:00:00"
             timestamp = ts_convert(timestamp)
-            metadata["gd_creator"] = author
+            metadata["creator"] = author
             metadata["gd_createTS"] = timestamp
             return metadata
 
@@ -445,24 +573,34 @@ def process_mod(dbid):
     doc = db.get_entity(dbid)
 
     if "psiMod" in doc:
-        modification = ""
-        residue = ""
-        coordinate = doc.get("coordinate", "")
-
-        if doc["psiMod"]["identifier"] == "00046":
-            modification = "Ph"
-            residue = "Ser"
-
-        if modification and residue and coordinate:
-            return f"pmod({modification}, {residue}, {coordinate})"
-        elif modification and residue:
-            return f"pmod({modification}, {residue})"
+        if isinstance(doc["psiMod"], dict):
+            psimods = [doc["psiMod"]]
         else:
-            return f"pmod({modification})"
+            psimods = doc["psiMod"]
 
-    else:
-        log.error(f"Unable to process modification: {dbid}")
-        return ""
+        for psimod in psimods:
+            import json
+            print('DumpVar:\n', json.dumps(psimod, indent=4))
+            modification = ""
+            residue = ""
+            coordinate = psimod.get("coordinate", "")
+
+            if psimod["identifier"] == "00046":
+                modification = "Ph"
+                residue = "Ser"
+
+            elif psimod["identifier"] == "00047":
+                modification = "Ph"
+                residue = "Thr"
+
+            else:
+                modification = f'PSIMOD:{psimod["identifier"]}'
+                
+            return PMod(modification=modification, residue=residue, coordinate=coordinate, dbid=dbid)
+
+        else:
+            log.error(f"Unable to process modification: {dbid}")
+            return PMod("Missing")
 
 
 def get_protein(doc) -> Entity:
@@ -514,15 +652,30 @@ def get_protein(doc) -> Entity:
 
 
 def get_catalyst(doc) -> str:
+    """Get catalyst"""
+
+    # print("Dump catalyst doc:\n", json.dumps(doc, indent=4))
 
     try:
-        r = process_component(doc["physicalEntity"]["dbId"])
+        dbid = doc["physicalEntity"]["dbId"]
+        stid = doc["physicalEntity"]["stId"]
+        stid_version = doc["physicalEntity"]["stIdVersion"]
+
+        catalyst = process_component(dbid)
+        if catalyst.function != "a":
+            catalyst = Function(function="activity", parameters=[catalyst], stid=stid, stid_version=stid_version, dbid=dbid)
+        
+
+        # relation
+        relation = "directlyIncreases"
+
+        r = Catalyst(catalyst, relation=relation, dbid=dbid, stid=stid, stid_version=stid_version)
 
     except Exception as e:
-        errors_fh.write(
-            f"{doc['dbId']}\tCatalyst\tNot able to process physical entity for catalyst: {str(e)}\n"
-        )
-        r = ""
+        errors_fh.write(f"{doc['physicalEntity']['dbId']}\tCatalyst\t{str(e)}\n")
+        log.exception(f"{doc['physicalEntity']['dbId']}\tCatalyst\tError: {str(e)}\n")
+        catalyst = f"Cannot process Catalyst for {doc['physicalEntity']['dbId']}"
+        r = Catalyst(catalyst, relation="", dbid="", stid="", stid_version="")
 
     return r
 
@@ -538,11 +691,11 @@ def get_gt(doc) -> str:
     loc = ""
 
     namespace = "TBD"
-    name = doc["name"][0]
+    label = doc["name"][0]
     if "referenceEntity" in doc:
-        name = clean_label(doc["referenceEntity"]["name"][0])
+        label = clean_label(doc["referenceEntity"]["name"][0])
     else:
-        name = clean_label(doc["name"][0])
+        label = clean_label(doc["name"][0])
 
     loc = None
     if doc.get("compartment", False):  # TODO - can there be multiple compartments?
@@ -556,7 +709,7 @@ def get_gt(doc) -> str:
         loc_name = clean_label(doc["compartment"][0]["displayName"])
         loc = f"{loc_prefix}:{loc_id}!{loc_name}"
 
-    protein = Entity(namespace, id=name, label=name, stid=stid, stid_version=stid_version, dbid=dbid, loc=loc)
+    protein = Entity(namespace, id=label, label=label, stid=stid, stid_version=stid_version, dbid=dbid, loc=loc)
     p = Function("p", [protein], stid, stid_version, dbid, loc=loc)
 
     return p
@@ -577,7 +730,7 @@ def get_compound(doc: dict) -> str:
         log.info(f"Missing compound databaseName {doc['referenceEntity']['databaseName']}")
         namespace = "TBD"
 
-    name = clean_label(doc["referenceEntity"]["name"][0])
+    label = clean_label(doc["referenceEntity"]["name"][0])
     id_ = doc["referenceEntity"]["identifier"]
 
     loc = None
@@ -592,7 +745,7 @@ def get_compound(doc: dict) -> str:
         loc_name = clean_label(doc["compartment"][0]["displayName"])
         loc = f"{loc_prefix}:{loc_id}!{loc_name}"
 
-    compound = Entity(namespace, id=id_, label=name, stid=stid, stid_version=stid_version, dbid=dbid, loc=loc)
+    compound = Entity(namespace, id=id_, label=label, stid=stid, stid_version=stid_version, dbid=dbid, loc=loc)
     c = Function("a", [compound], stid, stid_version, dbid, loc=loc)
 
     return c
@@ -616,7 +769,7 @@ def get_complex(doc: dict) -> str:
     stid_version = doc["stIdVersion"]
     dbid = doc["dbId"]
 
-    name = doc.get("name", [""])[0]
+    label = doc.get("name", [""])[0]
     loc = None
     if doc.get("compartment", False):  # TODO - can there be multiple compartments?
         if doc["compartment"][0]["databaseName"] == "GO":
@@ -630,9 +783,8 @@ def get_complex(doc: dict) -> str:
         loc = f"{loc_prefix}:{loc_id}!{loc_name}"
 
     c = Complex(
-        list(components), name=name, dbid=dbid, stid=stid, stid_version=stid_version, loc=loc
+        list(components), label=label, dbid=dbid, stid=stid, stid_version=stid_version, loc=loc
     )
-    complexes[dbid] = c
 
     return c
 
@@ -642,8 +794,8 @@ def get_set(doc: dict) -> dict:
     json.dump(doc, sets_fh, indent=4)
     # log.info("Set", doc=doc)
 
-    name = doc["name"][0]
-    name = clean_label(name)
+    label = doc["name"][0]
+    label = clean_label(label)
     members = set()
 
     if "hasMember" in doc:
@@ -659,7 +811,7 @@ def get_set(doc: dict) -> dict:
     stid = doc["stId"]
     stid_version = doc["stIdVersion"]
     dbid = doc["dbId"]
-    name = doc.get("name", [""])[0]
+    label = doc.get("name", [""])[0]
 
     loc = None
     if doc.get("compartment", False):  # TODO - can there be multiple compartments?
@@ -674,16 +826,19 @@ def get_set(doc: dict) -> dict:
         loc = f"{loc_prefix}:{loc_id}!{loc_name}"
 
     s = EntitySet(
-        list(members),
+        members=list(members),
+        namespace="REACTOME",
+        id=stid_version,
         stid=stid,
         stid_version=stid_version,
         dbid=dbid,
-        name=name,
-        type=doc["schemaClass"],
+        label=label,
+        type_=doc["schemaClass"],
         loc=loc,
     )
 
-    families[dbid] = s
+    # Adding 
+    entity_sets[dbid] = s
 
     return s
 
@@ -704,18 +859,22 @@ def get_regulator(doc) -> str:
 
         regulator = process_component(dbid)
 
+        # Wrap as activity
+        if regulator.function != "a":
+            regulator = Function(function="activity", parameters=[regulator], stid=stid, stid_version=stid_version, dbid=dbid)
+        
         # relation
         if doc["className"] in [
             "PositiveGeneExpressionRegulation",
             "PositiveRegulation",
         ]:
-            relation = "increases"
+            relation = "directlyIncreases"
 
         elif doc["className"] in [
             "NegativeGeneExpressionRegulation",
             "NegativeRegulation",
         ]:
-            relation = "decreases"
+            relation = "directlyDecreases"
         else:
             log.info(f"Unknown regulation relationship: {doc['dbId']}")
             relation = "regulates"
@@ -742,17 +901,17 @@ def get_gene(doc) -> str:
 
         namespace = doc["referenceEntity"]["databaseName"]
         id_ = doc["referenceEntity"]["identifier"]
-        name = doc["referenceEntity"]["geneName"][0]
-        name = clean_label(name)
+        label = doc["referenceEntity"]["geneName"][0]
+        label = clean_label(label)
 
     except Exception as e:
         id_ = ""
         namespace = ""
-        name = ""
+        label = ""
         errors_fh.write(f"{doc['dbId']}\tGene\t{str(e)}\n")
         log.exception(f"{doc['dbId']}\tGene\tError: {str(e)}\n")
 
-    gene = Entity(namespace, id=id_, label=name, stid=stid, stid_version=stid_version, dbid=dbid)
+    gene = Entity(namespace, id=id_, label=label, stid=stid, stid_version=stid_version, dbid=dbid)
     g = Function(function="g", parameters=[gene], stid=stid, stid_version=stid_version, dbid=dbid)
 
     return g
@@ -768,18 +927,18 @@ def get_rna(doc) -> str:
     try:
         prefix = doc["referenceEntity"]["databaseName"]
         _id = doc["referenceEntity"]["identifier"]
-        name = doc["referenceEntity"]["geneName"][0]
-        name = clean_label(name)
+        label = doc["referenceEntity"]["geneName"][0]
+        label = clean_label(label)
 
     except Exception as e:
         id_ = ""
         namespace = ""
-        name = ""
+        label = ""
 
-        errors_fh.write(f"{doc['dbId']}\RNA\t{str(e)}\n")
+        # errors_fh.write(f"{doc['dbId']}\RNA\t{str(e)}\n")
         log.exception(f"{doc['dbId']}\tRNA\tError: {str(e)}\n")
 
-    rna = Entity(namespace, id=id_, label=name, stid=stid, stid_version=stid_version, dbid=dbid)
+    rna = Entity(namespace, id=id_, label=label, stid=stid, stid_version=stid_version, dbid=dbid)
     r = Function(function="r", parameters=[rna], stid=stid, stid_version=stid_version, dbid=dbid)
 
     return r
@@ -794,10 +953,10 @@ def get_polymer(doc) -> str:
     
     namespace = "REACTOME"
     stid = doc["stId"]
-    name = doc["name"][0]
-    name = clean_label(name)
+    label = doc["label"][0]
+    label = clean_label(label)
 
-    polymer = Entity(namespace, id=stid, label=name, stid=stid, stid_version=stid_version, dbid=dbid)
+    polymer = Entity(namespace, id=stid, label=label, stid=stid, stid_version=stid_version, dbid=dbid)
     p = Function(function="FNTBDPolymer", parameters=[polymer], stid=stid, stid_version=stid_version, dbid=dbid)
     return p
 
@@ -812,10 +971,10 @@ def get_other_entity(doc) -> str:
     
     namespace = "REACTOME"
     stid = doc["stId"]
-    name = doc["name"][0]
-    name = clean_label(name)
+    label = doc["name"][0]
+    label = clean_label(label)
 
-    polymer = Entity(namespace, id=stid, label=name, stid=stid, stid_version=stid_version, dbid=dbid)
+    polymer = Entity(namespace, id=stid, label=label, stid=stid, stid_version=stid_version, dbid=dbid)
     p = Function(function="FNTBDOtherEntity", parameters=[polymer], stid=stid, stid_version=stid_version, dbid=dbid)
     return p
 
@@ -1009,66 +1168,21 @@ def get_function_type(dbid, members):
     return "MISSING"
 
 
-# def format_objects(comps):
-#     """Format complex and entity_sets into """
-
-#     global sets
-
-#     keys = ["inputs", "outputs", "catalysts", "regulators"]
-#     for key in keys:
-#         print("Key", key)
-#         if key in comps:
-#             for idx, item in enumerate(comps[key]):
-#                 print("Item", item)
-#                 if isinstance(item, EntitySet):
-#                     log.info("Formatting entity sets")
-#                     name = item.name
-#                     stid = item.stid
-#                     dbid = item.dbid
-#                     set_members, complex_members = flatten_obj(item, [], [])
-#                     members = list(set(flatten(set_members)))
-#                     comps[key][idx] = set_members
-#                     # function_type = get_function_type(dbid, members)
-#                     # bel_fn = f"{function_type}(reactome:{stid})"
-#                     # comps[key][idx] = bel_fn
-#                     # sets[bel_fn] = []
-#                     # for member in members:
-#                     #     sets[bel_fn].append({"subject": bel_fn, "relation": "hasMember", "object": member})
-
-#                 elif isinstance(item, Complex):
-#                     log.info("Formatting complex")
-#                     # members = sort_complex(flatten_obj(item))
-#                     set_members, complex_members = flatten_obj(item, [], [])
-#                     members = ", ".join(complex_members)
-#                     comps[key][idx] = f"complex({members})"
-
-#                 elif isinstance(item, Regulator):
-#                     if isinstance(item.regulator, Complex):
-#                         log.info("Formatting complex")
-#                         # members = sort_complex(flatten_obj(item.regulator))
-#                         set_members, complex_members = flatten_obj(item, [], [])
-#                         members = ", ".join(complex_members)
-#                         item.regulator = f"complex({members})"
-#                         comps[key][idx] = item
-
-#     return comps
-
-
 def process_candidate_set(candidateset):
 
     # print("Processing CandidateSet")
     dbid = candidateset.dbid
     stid = candidateset.stid
-    name = clean_label(candidateset.name)
+    label = clean_label(candidateset.label)
     fn = get_function_type(dbid, candidateset.members)
     sets[dbid] = []
     for member in candidateset.members:
         sets[dbid].append(
-            {"subject": f"{fn}(REACTOME:{stid}!{name})", "relation": "isA", "object": member,}
+            {"subject": f"{fn}(REACTOME:{stid}!{label})", "relation": "isA", "object": member,}
         )
 
     # debug(sets[dbid])
-    return f"{fn}(REACTOME:{stid}!{name})"
+    return f"{fn}(REACTOME:{stid}!{label})"
 
 
 def format_complex(complex, complex_list: list, level: int = 0):
@@ -1119,62 +1233,71 @@ def format_complex(complex, complex_list: list, level: int = 0):
         return temp_list
 
 
-def format_comps(comps):
-
-    global sets
-    keys = ["catalysts", "regulators", "inputs", "outputs"]
-    for key in keys:
-        print(f"\n\n#############  Key {key}  ################")
-        if key in comps:
-            for idx, item in enumerate(comps[key]):
-                complexes = []
-                if isinstance(item, str):
-                    print("String", item)
-                else:
-                    print(item.type, item.to_bel())
-                
-
-                if isinstance(item, Complex):
-                    complex_members = format_complex(item, [], 0)
-                    for cm in complex_members:
-                        complexes.append(f"complex({', '.join(sorted(list(set(cm))))})")
-                    comps[key][idx] = list(set(complexes))
-                    # debug(complexes)
-                if isinstance(item, EntitySet):
-                    comps[key][idx] = item.to_bel()
-                    # print(f"{item.to_bel()}  Members: {item.list_members()}")
-
-                if isinstance(item, Regulator):
-                    if isinstance(item.regulator, Complex):
-                        complex_members = format_complex(item.regulator, [], 0)
-                        for cm in complex_members:
-                            complexes.append(f"complex({', '.join(sorted(list(set(str(cm)))))})")
-                        comps[key][idx].regulator = list(set(complexes))
-
-    # debug(comps)
-
-
 def create_assertions(doc):
 
     comps = get_reaction_components(doc)
-    
-    print("DumpVar:\n", json.dumps(comps, cls=CustomEncoder, indent=4))
-    
-    #comps = format_comps(comps)
-
     assertions = []
+
+    # print("DumpVar:\n", json.dumps(comps, cls=CustomEncoder, indent=4))
+    
+    catalysts = comps.get("catalysts", [])
+    regulators = comps.get("regulators", [])
+    inputs = comps.get("inputs", [])
+    outputs = comps.get("outputs", [])
+
+    if len(regulators) > 0 and len(catalysts) > 0:
+        for regulator in regulators:
+            for catalyst in catalysts:
+                regulator_str = regulator.regulator.to_bel()
+                catalyst_str = catalyst.catalyst.to_bel()
+                assertion = f"{regulator_str} {regulator.relation} {catalyst_str}"
+                assertions.append(assertion)
+
+    elif len(regulators) > 0 and len(catalysts) == 0:
+        with open(f"checks/missing_catalyst_{comps['dbid']}.json", 'w') as f:
+            json.dump(comps, f, indent = 4)
+
+    # Process input and outputs into a BEL construct
+    target = ""
+    check_inputs, check_outputs = [], []
+    for input in inputs:
+        if input.function == "a":
+            continue
+        check_inputs.append(input)
+    for output in outputs:
+        if output.function == "a":
+            continue
+        check_outputs.append(output)
+    
+    if len(check_inputs) == 1 and len(check_outputs) == 1:
+        if check_inputs[0].loc != check_outputs[0].loc:  # Is this a translocation?
+            target = f"tloc({check_inputs[0].to_bel()}, {check_outputs[0].to_bel()})"
+        elif not check_inputs[0].mods and check_outputs[0].mods:  # Is this a modification?
+            target = check_outputs[0].to_bel()
+        else:  # default to a rxn()
+            reactants = ", ".join([input.to_bel() for input in inputs])
+            products = ", ".join([output.to_bel() for output in outputs])
+
+            target = f"rxn(reactants({reactants}), products({products}))"
+
+    if catalysts:
+        for catalyst in catalysts:
+            assertions.append(f"{catalyst.catalyst.to_bel()} {catalyst.relation} {target}")
+    else:
+        assertions.append(target)
 
     return assertions
 
 
-def process_reaction(reaction_id):
+def create_nanopub_from_reaction(reaction_id):
 
     doc = db.get_entity(reaction_id)
+
     if doc["schemaClass"] == "FailedReaction":
         # TODO - handle Failed Reaction - e.g. 3229118 (http://localhost:18529/_db/reactome_db/_admin/aardvark/index.html#collection/reactome/3229118)
         return {}
 
-    src_url = f"https://reactome.org/content/detail/{doc['stId']}"
+    src_url = f"https://reactome.org/content/detail/{doc['stIdVersion']}"
     metadata = {
         "source_url": src_url,
         "source": "Reactome",
@@ -1189,7 +1312,7 @@ def process_reaction(reaction_id):
 
     nanopub = {"assertions": [], "annotations": []}
     annotations = []
-    nanopub["id"] = f"Reactome_{doc['stId']}"
+    nanopub["id"] = f"Reactome_{doc['stIdVersion']}"
 
     nanopub["evidence"] = doc["summation"][0]["text"]
     nanopub["citation"] = {"uri": src_url}
@@ -1202,9 +1325,8 @@ def process_reaction(reaction_id):
         annotations.append(get_species(species_id))  # TODO - can there be multiple species?
 
     if "disease" in doc:
-        annotations.append(
-            get_disease(doc["disease"][0]["dbId"])
-        )  # TODO - can there be multiple diseases?
+        for disease_obj in doc["disease"]:
+            annotations.append(get_disease(disease_obj["dbId"]))
 
     nanopub["assertions"] = create_assertions(doc)
 
@@ -1226,7 +1348,7 @@ def convert(reaction_ids: list = []):
     f = open("reactome_nanopubs.jsonl", "w")
     try:
         for reaction_id in reaction_ids:
-            nanopub = process_reaction(reaction_id)
+            nanopub = create_nanopub_from_reaction(reaction_id)
 
             print("Nanopub:\n", json.dumps(nanopub, indent=4))
 

@@ -12,6 +12,7 @@ python-arango = "*"
 invoke = "*"
 jsons = "*"
 xxhash = "^1.4.3"
+pytest = "^5.3.5"
 
 [tool.poetry.dev-dependencies]
 pytest = "*"

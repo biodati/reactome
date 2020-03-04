@@ -6,6 +6,7 @@ Usage: $ {1: program}.py
 """
 
 import json
+import pdb, traceback, sys
 
 import collect
 import db
@@ -243,13 +244,22 @@ def main():
     # check_definedsets()
     # quit()
 
-    reaction_ids = ["445813", "9027627"]  # Regulated by 445813
-    reaction_ids = ["445813"]  # Regulated by 445813
+    # reaction_ids = ["9027627"]  # Catalyzed reaction
+    # reaction_ids = ["445813"]  # Regulated by 445813
+    reaction_ids = ["2399988"]  # Disease annotation
+
     # reaction_ids = ["5655336"]  # has a defined/candidate 5655280 set as a subset
     # reaction_ids = ["8952044"]  # complexes of complexes with candidatesets
-    #     reaction_ids = ["8942101"]  # complexes of complexes of entity_sets
+    # reaction_ids = ["8942101"]  # complexes of complexes of entity_sets
+    
     to_bel.convert(reaction_ids)
 
 
 if __name__ == "__main__":
-    main()
+
+    try:
+        main()
+    except:
+        extype, value, tb = sys.exc_info()
+        traceback.print_exc()
+        pdb.post_mortem(tb)
