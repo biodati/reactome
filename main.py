@@ -5,22 +5,22 @@
 Usage: $ {1: program}.py
 """
 
+# Standard Library
 import json
-import pdb, traceback, sys
+import os
+import sys
+import traceback
 
-import collect
-import db
-import logging_setup
-import settings
+# Third Party Imports
 import structlog
-import to_bel
 from logging_tree import printout
 
-log = structlog.getLogger(__name__)
-
-# printout()
-# quit()
-
+# Local Imports
+import collect
+import db
+import settings
+import to_bel
+from logging_setup import log
 
 db_objects = db.get_db()
 reactome_coll_name = db_objects["reactome_coll_name"]
@@ -224,6 +224,7 @@ def review_complexes():
                                 flag += 1
 
                         if flag > 2:
+                            # Standard Library
                             import json
 
                             f.write(f"ReactionID: {rid}\n")
@@ -232,9 +233,17 @@ def review_complexes():
 
 def main():
 
+    # TODO look for Traceback and Unable to process protein modification errors in logs
+
     # species_id = "9606"
     # pathways = collect.get_pathways(species_id=species_id)
     # reaction_ids = pathways_to_reactions(pathways=pathways)
+
+    reaction_ids = []
+    # reaction_ids = ["9615721"]
+
+    to_bel.convert(reaction_ids, update_all=True, limit=1000000)  # Collect all human reactions
+    sys.exit()
 
     # review_reactions()
     # quit()
@@ -246,20 +255,22 @@ def main():
 
     # reaction_ids = ["9027627"]  # Catalyzed reaction
     # reaction_ids = ["445813"]  # Regulated by 445813
-    reaction_ids = ["2399988"]  # Disease annotation
+    # reaction_ids = ["2399988"]  # Disease annotation
+    # # reaction_ids = ["2399988"]  # pmod() and var()
 
-    # reaction_ids = ["5655336"]  # has a defined/candidate 5655280 set as a subset
+    reaction_ids = ["5655336"]  # has a defined/candidate 5655280 set as a subset
     # reaction_ids = ["8952044"]  # complexes of complexes with candidatesets
     # reaction_ids = ["8942101"]  # complexes of complexes of entity_sets
-    
+
     to_bel.convert(reaction_ids)
 
 
 if __name__ == "__main__":
-
     try:
         main()
-    except:
-        extype, value, tb = sys.exc_info()
-        traceback.print_exc()
-        pdb.post_mortem(tb)
+    except KeyboardInterrupt:
+        print("Interrupted")
+        try:
+            sys.exit(0)
+        except SystemExit:
+            os._exit(0)

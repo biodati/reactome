@@ -1,15 +1,16 @@
-# Third Party Imports
+# Standard Library
 import time
 from typing import List
 
+# Third Party Imports
 import arango
+import cachetools
+import cachetools.func
 import requests
-import structlog
 
 # Local Imports
 import settings
-
-log = structlog.getLogger(__name__)
+from logging_setup import log
 
 reactome_db_name = settings.REACTOME_DB
 reactome_coll_name = settings.REACTOME_COLL
@@ -46,8 +47,8 @@ def get_db() -> arango.database.StandardDatabase:
     else:
         reactome_coll = reactome_db.create_collection(reactome_coll_name, index_bucket_count=64)
         # Adding of hash indexes:
-        reactome_coll.add_hash_index(fields=["doc_type"], name="doc_type_idx")
-        reactome_coll.add_hash_index(fields=["doc.stId"], name="stid_idx")
+        reactome_coll.add_persistent_index(fields=["doc_type"])
+        reactome_coll.add_persistent_index(fields=["doc.stId"])
 
     reactome_aql = reactome_db.aql
     reactome_aql.cache.configure(mode="on", max_results=10000)
@@ -94,19 +95,22 @@ def save_entity(doc):
     reactome_coll.insert({"_key": str(rid), "doc_type": doc_type, "doc": doc})
 
 
-def has_stid(stid):
-    """Check if stid exists in arangodb"""
+def is_stid_in_database(stid):
+    """Check to see if stId is in database"""
 
     query = f"""
     FOR d in {reactome_coll_name}
         FILTER d.doc.stId == "{stid}"
-        RETURN d._key
+        RETURN d
     """
 
-    cursor = reactome_aql.execute(query)
-    return list(cursor)
+    if len(list(reactome_db.aql.execute(query))) > 0:
+        return True
+
+    return False
 
 
+@cachetools.func.lru_cache(maxsize=5000, typed=False)
 def get_entity(dbid):
     """Get entity and save it"""
 
@@ -118,11 +122,11 @@ def get_entity(dbid):
         return reactome_coll.get(dbid)["doc"]
 
     else:
-        time.sleep(0.1)
+        time.sleep(0.2)
         r = requests.get(f"{settings.REACTOME_API_URL}/query/enhanced/{dbid}")
         if r.status_code != 200:
             log.error(f"Could not retrieve {dbid}")
-            return True
+            return {}
 
         doc = r.json()
         save_entity(doc)
@@ -132,6 +136,7 @@ def get_entity(dbid):
 def initial_reload():
     """Used to reload downloaded content into arangodb"""
 
+    # Standard Library
     import glob
     import json
 
@@ -157,6 +162,7 @@ def collect_all_reactions() -> List[str]:
     query = f"""
     FOR d in {reactome_coll_name}
         FILTER d.doc_type == "Reaction"
+        FILTER d.doc.speciesName == "Homo sapiens"
         RETURN d._key
     """
     cursor = reactome_aql.execute(query, batch_size=10, ttl=3600000)

@@ -1,84 +1,97 @@
+#!/usr/bin/env python
+# -*-coding: utf-8 -*-
+
 # Standard Library
 import logging
+import logging.config
 import sys
 
 # Third Party Imports
-# from pythonjsonlogger import jsonlogger
 import structlog
-import structlog._frames
 
-# Studio Imports
+# Local Imports
 import settings
 
-# Setup jsonlogger to print JSON
-#   see example of integrating Sentry https://codywilbourn.com/2018/08/23/playing-with-python-structured-logs/
-json_handler = logging.StreamHandler(sys.stdout)
-# json_handler.setFormatter(jsonlogger.JsonFormatter())  # Breaks structlog.processors.JSONRenderer
-
-log_level = "INFO"
-
-# Add sys.stdout Stream handlers to logging
-logging.basicConfig(
-    format="%(message)s",
-    handlers=[json_handler],
-    level=log_level,  # Or whatever the general level should be
-)
-
-root_logger = logging.getLogger()
-root_logger.setLevel(log_level)
-
-
-def add_log_level(logger, method_name, event_dict):
-    """
-    Add the log level to the event dict.
-    """
-    if method_name == "warn":
-        # The stdlib has an alias
-        method_name = "warning"
-
-    event_dict["log.level"] = method_name
-    return event_dict
+urllib3_logger = logging.getLogger("urllib3")
+urllib3_logger.setLevel("CRITICAL")
 
 
 def add_app_context(logger, method_name, event_dict):
     f, name = structlog._frames._find_first_app_frame_and_name(["logging", __name__])
-    event_dict["file"] = f.f_code.co_filename
+    event_dict["file"] = f.f_code.co_filename.replace(
+        "/Users/william/biodati/reactome_to_bel/", "./"
+    )
     event_dict["line"] = f.f_lineno
     event_dict["function"] = f.f_code.co_name
+
+    # event_dict["message"] = event_dict.pop("event", "")
+
     return event_dict
 
 
-def elastic_common_schema_keys(logger, method_name, event_dict):
-    """Revise event_dict to use Elastic Common Schema"""
+# timestamper = structlog.processors.TimeStamper(fmt="%Y-%m-%d %H:%M:%S")
 
-    # mydict[new_key] = mydict.pop(old_key)  replace a key
-    return event_dict
-
-
-processors = [
-    structlog.stdlib.filter_by_level,
-    structlog.stdlib.add_logger_name,
-    add_log_level,
-    add_app_context,
-    structlog.processors.TimeStamper(fmt="iso", key="@timestamp"),
-    structlog.processors.StackInfoRenderer(),  # adds stack if stack_info=True
-    structlog.processors.format_exc_info,  # Formats exc_info
-    structlog.processors.UnicodeDecoder(),  # Decodes all bytes in dict to unicode
-    # elastic_common_schema_keys,
+pre_chain = [
+    # Add the log level and a timestamp to the event_dict if the log entry
+    # is not from structlog.
+    structlog.stdlib.add_log_level,
+    # timestamper,
 ]
 
-processors.append(structlog.processors.ExceptionPrettyPrinter())
+log = structlog.get_logger()
 
-processors.append(
-    structlog.processors.JSONRenderer(
-        indent=2, sort_keys=True
-    )  # renders the log JSON obj as a string
+logging.config.dictConfig(
+    {
+        "version": 1,
+        "disable_existing_loggers": False,
+        "formatters": {
+            "plain": {
+                "()": structlog.stdlib.ProcessorFormatter,
+                "processor": structlog.dev.ConsoleRenderer(colors=False),
+                "foreign_pre_chain": pre_chain,
+            },
+            "colored": {
+                "()": structlog.stdlib.ProcessorFormatter,
+                "processor": structlog.dev.ConsoleRenderer(colors=True),
+                "foreign_pre_chain": pre_chain,
+            },
+        },
+        "handlers": {
+            "default": {
+                "level": settings.LOGLEVEL,
+                "class": "logging.StreamHandler",
+                "formatter": "colored",
+            },
+            "file": {
+                "level": settings.LOGLEVEL,
+                "class": "logging.FileHandler",
+                "mode": "a",
+                "filename": "reactome_conversion.log",
+                "formatter": "plain",
+            },
+        },
+        "loggers": {
+            "": {"handlers": ["default", "file"], "level": settings.LOGLEVEL, "propagate": True,},
+        },
+        # "loggers": {"": {"handlers": ["default"], "level": settings.LOGLEVEL, "propagate": True,},},
+    }
 )
 
 structlog.configure(
-    processors=processors,
+    processors=[
+        structlog.stdlib.add_log_level,
+        structlog.stdlib.PositionalArgumentsFormatter(),
+        # timestamper,
+        add_app_context,
+        structlog.processors.StackInfoRenderer(),
+        structlog.processors.format_exc_info,
+        structlog.processors.ExceptionPrettyPrinter(),
+        structlog.stdlib.ProcessorFormatter.wrap_for_formatter,
+    ],
     context_class=dict,
     logger_factory=structlog.stdlib.LoggerFactory(),
     wrapper_class=structlog.stdlib.BoundLogger,
     cache_logger_on_first_use=True,
 )
+
+# log.info("Here 2", test=True, test2=1)
